@@ -3,6 +3,8 @@ name = "fsvisor"
 version = "0.1.0"
 description = "A small client for pulling Formsite form results into pandas DataFrames"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Nicholas Licalsi", email = "nicholas.licalsi@tjinspection.net" }
 ]
