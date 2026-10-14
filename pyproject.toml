@@ -1,0 +1,26 @@
+[project]
+name = "fsvisor"
+version = "0.1.0"
+description = "A small client for pulling Formsite form results into pandas DataFrames"
+readme = "README.md"
+authors = [
+    { name = "Nicholas Licalsi", email = "nicholas.licalsi@tjinspection.net" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.2",
+    "python-dotenv>=1.0",
+    "requests>=2.32",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
