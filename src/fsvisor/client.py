@@ -89,6 +89,16 @@ class FormSiteClient:
             self._user_id = user_id
 
     ### Generic Request Methods ###
+    @staticmethod
+    def _is_retryable(error: requests.exceptions.RequestException) -> bool:
+        # Only rate limits and server-side errors can succeed on a retry; other 4xx errors
+        # (bad credentials, unknown form, bad parameters) will fail the same way every time
+        if isinstance(error, requests.exceptions.HTTPError) and error.response is not None:
+            status = error.response.status_code
+            return status == 429 or status >= 500
+        # Connection errors and timeouts are transient
+        return isinstance(error, (requests.exceptions.ConnectionError, requests.exceptions.Timeout))
+
     def _make_request(self, method, url, params=None, body=None):
         # Set parameters for backoff retry
         max_attempts = 5 # Maximum number of attempts
@@ -104,16 +114,18 @@ class FormSiteClient:
                 response.raise_for_status() # Raise an exception for 4xx or 5xx errors
                 return response # Return the response if successful
             except requests.exceptions.RequestException as e:
+                if not self._is_retryable(e):
+                    self._log('error', f"Request failed with a non-retryable error: {e}")
+                    raise
                 if attempt == max_attempts - 1:
                     self._log('error', f"Max attempts reached. Last Exception: {e}")
-                else:
-                    # Calculate delay with jitter
-                    jitter = random.uniform(0.5, 1.5) # Random jitter between 0.5 and 1.5
-                    delay_with_jitter = delay * jitter # Delay multiplied by jitter
-                    self._log('warning', f"Attempt {attempt + 1} failed. Retrying in {delay_with_jitter} seconds.")
-                    time.sleep(delay_with_jitter) # Sleep for the calculated delay
-                    delay = min(max_delay, delay * 2) # Exponential backoff with max delay
-        return None # Return None once every attempt has failed
+                    raise
+                # Calculate delay with jitter
+                jitter = random.uniform(0.5, 1.5) # Random jitter between 0.5 and 1.5
+                delay_with_jitter = delay * jitter # Delay multiplied by jitter
+                self._log('warning', f"Attempt {attempt + 1} failed. Retrying in {delay_with_jitter} seconds.")
+                time.sleep(delay_with_jitter) # Sleep for the calculated delay
+                delay = min(max_delay, delay * 2) # Exponential backoff with max delay
 
     ### URL Construction Methods ###
     def _construct_url(self, endpoint):
@@ -143,6 +155,8 @@ class FormSiteClient:
             sort_direction (str): The direction in which to sort the results (asc or desc).
         Returns:
             list: A list of dictionaries containing the results for the form.
+        Raises:
+            requests.exceptions.RequestException: If the request fails and cannot be retried.
         """
         # Set the URL for the API request
         url = self._construct_url(f'{form_id}/results')
@@ -167,11 +181,6 @@ class FormSiteClient:
         # Make the API request
         response = self._make_request(requests.get, url, params=params)
 
-        # Check if the response is blank and return an empty list
-        if response is None:
-            self._log('error', f'Error fetching results for form ID: {form_id}')
-            return []
-
         # Return the 'results' part of the JSON response
         return response.json().get('results', [])
 
@@ -183,6 +192,8 @@ class FormSiteClient:
             results_labels (int): The results labels to fetch metadata for.
         Returns:
             dict: A mapping of item IDs to their labels.
+        Raises:
+            requests.exceptions.RequestException: If the request fails and cannot be retried.
         """
         # Set the URL for the API request
         url = self._construct_url(f'{form_id}/items')
@@ -196,10 +207,6 @@ class FormSiteClient:
 
         # Make the API request
         response = self._make_request(requests.get, url, params=params)
-
-        # Check if the response is blank and return an empty dict
-        if response is None:
-            return {}
 
         # Return the 'items' part of the JSON response
         items = response.json().get('items', [])
@@ -229,6 +236,9 @@ class FormSiteClient:
 
         Returns:
             pd.DataFrame: A labeled DataFrame containing the results.
+
+        Raises:
+            requests.exceptions.RequestException: If any page or the metadata request fails and cannot be retried.
         """
         all_results = []
         page = 1

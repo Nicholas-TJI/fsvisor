@@ -22,13 +22,13 @@ class _ListLogger:
 
 
 class _Response:
-    def __init__(self, payload: dict, should_raise: bool = False):
+    def __init__(self, payload: dict, status_code: int = 200):
         self._payload = payload
-        self._should_raise = should_raise
+        self.status_code = status_code
 
     def raise_for_status(self):
-        if self._should_raise:
-            raise requests.exceptions.HTTPError("boom")
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} error", response=self)
 
     def json(self):
         return self._payload
@@ -67,37 +67,67 @@ def test_missing_credentials_raise(monkeypatch) -> None:
         FormSiteClient(load_env=False)
 
 
-def test_make_request_retries_then_succeeds(client) -> None:
+@pytest.mark.parametrize(
+    "transient",
+    [
+        requests.exceptions.ConnectionError("dropped"),
+        requests.exceptions.Timeout("slow"),
+        _Response({}, status_code=429),
+        _Response({}, status_code=503),
+    ],
+)
+def test_make_request_retries_transient_errors_then_succeeds(client, transient) -> None:
     calls = {"count": 0}
 
     def _method(*_a, **_k):
         calls["count"] += 1
         if calls["count"] == 1:
-            raise requests.exceptions.RequestException("temporary")
+            if isinstance(transient, Exception):
+                raise transient
+            return transient
         return _Response({"ok": True})
 
     response = client._make_request(_method, "https://example.com")
-    assert isinstance(response, _Response)
     assert response.json()["ok"] is True
     assert calls["count"] == 2
     assert any(level == "warning" for level, _ in client.logger.records)
 
 
-def test_make_request_returns_none_after_max_attempts(client) -> None:
-    def _method(*_a, **_k):
-        raise requests.exceptions.RequestException("always failing")
+@pytest.mark.parametrize("status_code", [400, 401, 403, 404])
+def test_make_request_raises_client_errors_without_retrying(client, status_code) -> None:
+    calls = {"count": 0}
 
-    assert client._make_request(_method, "https://example.com") is None
+    def _method(*_a, **_k):
+        calls["count"] += 1
+        return _Response({}, status_code=status_code)
+
+    with pytest.raises(requests.exceptions.HTTPError) as excinfo:
+        client._make_request(_method, "https://example.com")
+    assert excinfo.value.response.status_code == status_code
+    assert calls["count"] == 1
+
+
+def test_make_request_raises_after_max_attempts(client) -> None:
+    calls = {"count": 0}
+
+    def _method(*_a, **_k):
+        calls["count"] += 1
+        raise requests.exceptions.ConnectionError("always failing")
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        client._make_request(_method, "https://example.com")
+    assert calls["count"] == 5
     assert any(level == "error" for level, _ in client.logger.records)
 
 
-def test_failed_requests_return_empty(client, monkeypatch) -> None:
-    def _method(*_a, **_k):
-        raise requests.exceptions.RequestException("always failing")
-
-    monkeypatch.setattr("fsvisor.client.requests.get", _method)
-    assert client.get_form_results("form-1") == []
-    assert client.get_form_metadata("form-1") == {}
+def test_failed_requests_propagate_from_public_methods(client, monkeypatch) -> None:
+    monkeypatch.setattr("fsvisor.client.requests.get", lambda *_a, **_k: _Response({}, status_code=401))
+    with pytest.raises(requests.exceptions.HTTPError):
+        client.get_form_results("form-1")
+    with pytest.raises(requests.exceptions.HTTPError):
+        client.get_form_metadata("form-1")
+    with pytest.raises(requests.exceptions.HTTPError):
+        client.get_results_dataframe("form-1", results_view=10)
 
 
 def test_get_form_results_and_metadata(client, monkeypatch) -> None:
